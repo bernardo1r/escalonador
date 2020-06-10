@@ -12,7 +12,11 @@
 #define IO_DURATION 3*QUANTUM
 
 int pDuration[3] = {QUANTUM, 2*QUANTUM, 4*QUANTUM};
+
 int flag_procTerm = 0;
+int flag_IO = 0;
+
+int elapsTime = 0;
 
 pthread_t idObserver;
 
@@ -25,13 +29,31 @@ struct procStruct {
 
 void print_newQueue(void *val)
 {
-    printf("%s -- ", ((struct procStruct *)val)->name);
+    printf("%s <- ", ((struct procStruct *)val)->name);
 }
 
 void print_readQueue(void *val)
 {
     struct procStruct *proc = (struct procStruct *) val;
-    printf("%s pid(%d) -- ", proc->name, proc->pid);
+    printf("%s pid(%d) <- ", proc->name, proc->pid);
+}
+
+
+void print_ioQueue(void *val)
+{
+    struct procStruct *proc = (struct procStruct *) val;
+    printf("%s pid(%d) tempo io res(%d) <- ", proc->name, proc->pid, proc->ioRemTime);
+}
+
+void *map_subtract_elapsTime(void *val)
+{
+    int *number = &(((struct procStruct *)val)->ioRemTime);
+
+    *number -= elapsTime;
+    if (*number < 0)
+        *number = 0;
+
+    return val;
 }
 
 void *procObserver(void *arg)
@@ -41,11 +63,15 @@ void *procObserver(void *arg)
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
     pthread_sigmask(SIG_BLOCK, &set, NULL);
     for (;;)
     {
         if (*curProc)
         {
+            if ((*curProc)->pid == -1)
+                return NULL;
+
             if ((*curProc)->pid != 0)
             {
                 waitpid((*curProc)->pid, &status, WUNTRACED);
@@ -71,9 +97,14 @@ int initProc(char *procName)
     return pid;
 }
 
-void handle_ignore(int sig)
+void handle_procTerm(int sig)
 {
     flag_procTerm = 1;
+}
+
+void handle_procIO(int sig)
+{
+    flag_IO = 1;
 }
 
 int main(int argc, char **argv)
@@ -81,11 +112,12 @@ int main(int argc, char **argv)
     if (!(argc > 1))
         return 0;
     struct procStruct procs[argc-1];
-    struct procStruct *curProc = NULL;
+    struct procStruct *curProc = NULL, *tmpProc = NULL;
     
     /* create queues and fill process structs */
     Queue *newQueue;
     Queue *readyQueue[3];
+    Queue *ioQueue = queue_create();
     for (int i = 0; i < 3; i++)
         readyQueue[i] = queue_create();
 
@@ -100,7 +132,8 @@ int main(int argc, char **argv)
     fputs("Fila de novos: ", stdout);
     queue_print(newQueue, print_newQueue);
     
-    signal(SIGUSR1, handle_ignore);
+    signal(SIGUSR1, handle_procTerm);
+    signal(SIGUSR2, handle_procIO);
     pthread_create(&idObserver, NULL, procObserver, &curProc);
     int remTime, err;
     for (;;)
@@ -117,32 +150,89 @@ int main(int argc, char **argv)
             printf("\nRetomando processo %s - pid %d\n", curProc->name, curProc->pid);
             kill(curProc->pid, SIGCONT);
         }
-        else
-            break;
+        else if (!queue_isEmpty(ioQueue)) /* if all processes are doing IO */
+        {
+            puts("\nTodos os processos estao fazendo I/O");
+            puts("Dormindo por 1 QUANTUM");
+            sleep(QUANTUM);
+            elapsTime = QUANTUM;
 
-        flag_procTerm = 0;
-        //fputs("Fila de novos: ", stdout);
-        //queue_print(newQueue, print_newQueue);
-        //fputs("Fila de prontos: ", stdout);
-        //queue_print(readyQueue[0], print_readQueue);
-        //puts("");
+            queue_map(ioQueue, map_subtract_elapsTime);
+
+            tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
+            while (tmpProc->ioRemTime == 0)
+            {
+                printf("\nProcesso terminou I/O %s - pid %d\n", tmpProc->name, tmpProc->pid);
+                queue_push(readyQueue[0], queue_pop(ioQueue));
+                tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
+                if (tmpProc == NULL)
+                    break;
+
+            }
+            continue;
+        }
+        else /* all programs have finished */
+        {
+            curProc->pid = -1; /* to make thread exit */
+            break;
+        }
+
+        /*puts("");
+        fputs("Fila de novos: ", stdout);
+        queue_print(newQueue, print_newQueue);
+        fputs("Fila de prontos: ", stdout);
+        queue_print(readyQueue[0], print_readQueue);
+        fputs("Fila de io: ", stdout);
+        queue_print(ioQueue, print_ioQueue);
+        puts("");*/
         remTime = sleep(pDuration[0]);
-            
         
         err = kill(curProc->pid, SIGSTOP);
-        if (err)
+        fputs("", stdout); /* to avoid pending signals from being received at the next sleep */
+        elapsTime = pDuration[0] - remTime;
+
+        if (!queue_isEmpty(ioQueue)) /* check for current io processes */
+        {   
+            queue_map(ioQueue, map_subtract_elapsTime);
+
+            tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
+            while (tmpProc->ioRemTime == 0)
+            {
+                printf("Processo terminou I/O %s - pid %d\n", tmpProc->name, tmpProc->pid);
+                queue_push(readyQueue[0], queue_pop(ioQueue));
+                tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
+                if (tmpProc == NULL)
+                    break;
+            }
+        }
+
+        if (err) /* process ended */
         {
-            //printf("Processo acabou %s - pid %d\n", curProc->name, curProc->pid);
+            printf("Processo acabou %s - pid %d\n", curProc->name, curProc->pid);
         }
         else
         {
-            //printf("Processo sendo parado %s - pid %d\n", curProc->name, curProc->pid);
-            queue_push(readyQueue[0], curProc);
+            if (flag_IO)
+            {
+                printf("Processo comecou a fazer I/O %s - pid %d\n", curProc->name, curProc->pid);
+                curProc->ioRemTime = IO_DURATION;
+                queue_push(ioQueue, curProc);
+                flag_IO = 0;
+            }
+            else 
+            {
+                //printf("Processo sendo parado %s - pid %d\n", curProc->name, curProc->pid);
+                queue_push(readyQueue[0], curProc);
+            }
+                
         }
     }
+
+    pthread_join(idObserver, NULL);
 
     for (int i = 0; i < 3; i++)
         queue_free(readyQueue[i]);
     queue_free(newQueue);
+    queue_free(ioQueue);
     return 0;
 }

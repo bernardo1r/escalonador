@@ -64,6 +64,24 @@ void queue_print(Queue *q, void (*print)(void *))
     puts("");
 }
 
+void queue_map(Queue *q, void *(*map)(void *))
+{
+    struct node *it = q->first;
+    while (it != NULL)
+    {
+        it->val = map(it->val);
+        it = it->next;
+    }
+}
+
+void *queue_seeFirst(Queue *q)
+{
+    if (queue_isEmpty(q))
+        return NULL;
+        
+    return q->first->val;
+}
+
 void queue_free(Queue *q)
 {
     while (!queue_isEmpty(q))

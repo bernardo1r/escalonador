@@ -10,4 +10,8 @@ void *queue_pop(Queue *q);
 
 void queue_print(Queue *q, void (*print)(void *));
 
+void queue_map(Queue *q, void *(*map)(void *));
+
+void *queue_seeFirst(Queue *q);
+
 void queue_free(Queue *q);
