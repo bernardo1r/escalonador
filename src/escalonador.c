@@ -10,8 +10,9 @@
 
 #define QUANTUM 1
 #define IO_DURATION 3*QUANTUM
+#define MAX_P 3
 
-int pDuration[3] = {QUANTUM, 2*QUANTUM, 4*QUANTUM};
+int pDuration[MAX_P] = {QUANTUM, 2*QUANTUM, 4*QUANTUM};
 
 int flag_procTerm = 0;
 int flag_IO = 0;
@@ -24,6 +25,7 @@ struct procStruct {
     int pid;
     int ioRemTime;
     char *name;
+    int prio;
 };
 
 
@@ -42,7 +44,7 @@ void print_readQueue(void *val)
 void print_ioQueue(void *val)
 {
     struct procStruct *proc = (struct procStruct *) val;
-    printf("%s pid(%d) tempo io res(%d) <- ", proc->name, proc->pid, proc->ioRemTime);
+    printf("%s pid(%d) - prioridade (%d)- tempo io res(%d) <- ", proc->name, proc->pid, proc->prio, proc->ioRemTime);
 }
 
 void *map_subtract_elapsTime(void *val)
@@ -107,6 +109,16 @@ void handle_procIO(int sig)
     flag_IO = 1;
 }
 
+int searchNewQueues(Queue **readyQueue, int len)
+{
+    for (int i = 0; i < len; i++)
+    {
+        if (!queue_isEmpty(readyQueue[i]))
+            return i;
+    }
+    return -1;
+}
+
 int main(int argc, char **argv)
 {
     if (!(argc > 1))
@@ -116,9 +128,9 @@ int main(int argc, char **argv)
     
     /* create queues and fill process structs */
     Queue *newQueue;
-    Queue *readyQueue[3];
+    Queue *readyQueue[MAX_P];
     Queue *ioQueue = queue_create();
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < MAX_P; i++)
         readyQueue[i] = queue_create();
 
     newQueue = queue_create();
@@ -127,6 +139,7 @@ int main(int argc, char **argv)
         procs[i-1].pid = 0;
         procs[i-1].ioRemTime = 0;
         procs[i-1].name = argv[i];
+        procs[i-1].prio = -1;
         queue_push(newQueue, &procs[i-1]);
     }
     fputs("Fila de novos: ", stdout);
@@ -135,19 +148,22 @@ int main(int argc, char **argv)
     signal(SIGUSR1, handle_procTerm);
     signal(SIGUSR2, handle_procIO);
     pthread_create(&idObserver, NULL, procObserver, &curProc);
-    int remTime, err;
+    int remTime, err, curPrio;
     for (;;)
     {
         if (!queue_isEmpty(newQueue))
         {
             curProc = (struct procStruct *) queue_pop(newQueue);
             curProc->pid = initProc(curProc->name);
-            printf("\nIniciando processo %s - pid %d\n", curProc->name, curProc->pid);
+            curProc->prio = 0;
+            printf("\nIniciando processo %s - pid %d - prioridade %d\n", curProc->name, curProc->pid, curProc->prio);
+
+            curPrio = 0;
         } 
-        else if (!queue_isEmpty(readyQueue[0]))
+        else if ((curPrio = searchNewQueues(readyQueue, MAX_P)) != -1)
         {
-            curProc = (struct procStruct *) queue_pop(readyQueue[0]);
-            printf("\nRetomando processo %s - pid %d\n", curProc->name, curProc->pid);
+            curProc = (struct procStruct *) queue_pop(readyQueue[curPrio]);
+            printf("\nRetomando processo %s - pid %d - prioridade %d\n", curProc->name, curProc->pid, curProc->prio);
             kill(curProc->pid, SIGCONT);
         }
         else if (!queue_isEmpty(ioQueue)) /* if all processes are doing IO */
@@ -160,15 +176,29 @@ int main(int argc, char **argv)
             queue_map(ioQueue, map_subtract_elapsTime);
 
             tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
+            curPrio = tmpProc->prio;
             while (tmpProc->ioRemTime == 0)
             {
-                printf("\nProcesso terminou I/O %s - pid %d\n", tmpProc->name, tmpProc->pid);
-                queue_push(readyQueue[0], queue_pop(ioQueue));
+                printf("\nProcesso terminou I/O %s - pid %d - prioridade %d\n", tmpProc->name, tmpProc->pid, tmpProc->prio);
+                queue_pop(ioQueue);
+                queue_push(readyQueue[tmpProc->prio], tmpProc);
                 tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
                 if (tmpProc == NULL)
                     break;
 
             }
+            puts("");
+            fputs("Fila de novos: ", stdout);
+            queue_print(newQueue, print_newQueue);
+            for (int i = 0; i < MAX_P; i++)
+            {
+                printf("Fila de prontos %d: ", i);
+                queue_print(readyQueue[i], print_readQueue);
+            }
+            fputs("Fila de io: ", stdout);
+            queue_print(ioQueue, print_ioQueue);
+            puts("");
+            puts("----------------------------------");
             continue;
         }
         else /* all programs have finished */
@@ -177,19 +207,22 @@ int main(int argc, char **argv)
             break;
         }
 
-        /*puts("");
+        puts("");
         fputs("Fila de novos: ", stdout);
         queue_print(newQueue, print_newQueue);
-        fputs("Fila de prontos: ", stdout);
-        queue_print(readyQueue[0], print_readQueue);
+        for (int i = 0; i < MAX_P; i++)
+        {
+            printf("Fila de prontos %d: ", i);
+            queue_print(readyQueue[i], print_readQueue);
+        }
         fputs("Fila de io: ", stdout);
         queue_print(ioQueue, print_ioQueue);
-        puts("");*/
-        remTime = sleep(pDuration[0]);
+        puts("");
+        remTime = sleep(pDuration[curPrio]);
         
         err = kill(curProc->pid, SIGSTOP);
         fputs("", stdout); /* to avoid pending signals from being received at the next sleep */
-        elapsTime = pDuration[0] - remTime;
+        elapsTime = pDuration[curPrio] - remTime;
 
         if (!queue_isEmpty(ioQueue)) /* check for current io processes */
         {   
@@ -198,8 +231,9 @@ int main(int argc, char **argv)
             tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
             while (tmpProc->ioRemTime == 0)
             {
-                printf("Processo terminou I/O %s - pid %d\n", tmpProc->name, tmpProc->pid);
-                queue_push(readyQueue[0], queue_pop(ioQueue));
+                printf("\nProcesso terminou I/O %s - pid %d - prioridade %d\n", tmpProc->name, tmpProc->pid, tmpProc->prio);
+                queue_pop(ioQueue);
+                queue_push(readyQueue[tmpProc->prio], tmpProc);
                 tmpProc = (struct procStruct *) queue_seeFirst(ioQueue);
                 if (tmpProc == NULL)
                     break;
@@ -214,18 +248,23 @@ int main(int argc, char **argv)
         {
             if (flag_IO)
             {
-                printf("Processo comecou a fazer I/O %s - pid %d\n", curProc->name, curProc->pid);
                 curProc->ioRemTime = IO_DURATION;
+                if (curProc->prio != 0)
+                    curProc->prio -= 1;
+
                 queue_push(ioQueue, curProc);
+                printf("Processo comecou a fazer I/O %s - pid %d - nova prioridade %d\n", curProc->name, curProc->pid, curProc->prio);
                 flag_IO = 0;
             }
             else 
             {
-                //printf("Processo sendo parado %s - pid %d\n", curProc->name, curProc->pid);
-                queue_push(readyQueue[0], curProc);
+                if (curProc->prio != MAX_P-1)
+                    curProc->prio += 1;
+                queue_push(readyQueue[curProc->prio], curProc);
+                printf("Processo sendo parado %s - pid %d - nova prioridade %d\n", curProc->name, curProc->pid, curProc->prio);
             }
-                
         }
+        puts("----------------------------------");
     }
 
     pthread_join(idObserver, NULL);
